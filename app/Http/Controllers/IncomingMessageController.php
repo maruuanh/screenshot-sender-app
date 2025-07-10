@@ -3,9 +3,14 @@
 namespace App\Http\Controllers;
 
 use App\Models\IncomingMessage;
-use Illuminate\Http\Request;
+use App\Models\Screenshot;
 use App\DataTables\IncomingMessageDataTable;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
+
 class IncomingMessageController extends Controller
 {
     /**
@@ -18,19 +23,27 @@ class IncomingMessageController extends Controller
         ]);
     }
 
-    public function handleWebhook(Request $request) 
+    public function verifyWebhook(Request $request)
     {
-        
-        $verifyToken = env('WHATSAPP_VERIFY_TOKEN');
-        if($request->input('hub_mode') === 'subscribe' && $request->input('hub_verify_token') === $verifyToken) {
-            return $request->input('hub_challenge');
-        } else {
-            return response('Invalid token', 403);
+        $verify_token = env('WHATSAPP_TOKEN');
+
+        if (
+            $request->get('hub_mode') === 'subscribe' &&
+            $request->get('hub_verify_token') === $verify_token
+        ) {
+            return response($request->get('hub_challenge'), 200);
         }
 
+        return response('Token mismatch', 403);
+    }
+
+    public function handleWebhook(Request $request)
+    {
+        Log::info('Webhook dipanggil!');
+        Log::info(json_encode($request->all()));
         $entry = $request->input('entry')[0] ?? null;
-        
-        if(!$entry || !isset($entry['changes'][0]['value']['messages'][0])) {
+
+        if (!$entry || !isset($entry['changes'][0]['value']['messages'][0])) {
             return response('No message found', 422);
         }
         DB::beginTransaction();
@@ -41,14 +54,14 @@ class IncomingMessageController extends Controller
         $body = $type === 'text' ? $messageData['text']['body'] : null;
         $mediaUrl = null;
 
-        if($type === 'image') {
+        if ($type === 'image') {
             $mediaId = $messageData['image']['id'];
-            $mediaUrl = Http::withToken(env('WHATSAPP_TOKEN'))->get('https://graph.facebook.com/v19.0/'.$mediaId);
+            $mediaUrl = Http::withToken(env('WHATSAPP_TOKEN'))->get('https://graph.facebook.com/v19.0/' . $mediaId);
             $mediaUrl = $mediaUrl->json()['url'] ?? null;
 
-            if($mediaUrl) {
+            if ($mediaUrl) {
                 $mediaResponse = Http::withToken(env('WHATSAPP_TOKEN'))->get($mediaUrl);
-                $filename = 'ss_'.time().'.jpg';
+                $filename = 'ss_' . time() . '.jpg';
                 $incomingMessage = IncomingMessage::create([
                     'wa_id' => $messageData['id'] ?? null,
                     'from_number' => $from,
@@ -56,25 +69,20 @@ class IncomingMessageController extends Controller
                     'message_type' => $type,
                     'media_url' => $mediaUrl,
                 ]);
-        
-                Storage::disk('public')->put('screenshots/'.$filename, $mediaResponse->body());
-                if($incomingMessage) {
+
+                Storage::disk('public')->put('screenshots/' . $filename, $mediaResponse->body());
+                if ($incomingMessage) {
                     $screenshot = Screenshot::create([
                         'incoming_message_id' => $incomingMessage->id,
                         'sender_number' => $from,
                         'image_path' => $filename,
                     ]);
                 }
-        
+
                 DB::commit();
-                return response()->json(['status' => 'image saved'], 200);
-            }
-            else {
-                DB::rollBack();
-                return response()->json(['status' => 'image not saved'], 400);
             }
         }
-
+        return response()->json(['status' => 'ok'], 200); // <-- ini penting!
     }
 
     /**
